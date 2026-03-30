@@ -1,0 +1,11 @@
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/bin/Debug/net10.0/Application.deps.json
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/bin/Debug/net10.0/Application.dll
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/bin/Debug/net10.0/Application.pdb
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.GeneratedMSBuildEditorConfig.editorconfig
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.AssemblyInfoInputs.cache
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.AssemblyInfo.cs
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.csproj.CoreCompileInputs.cache
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.dll
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/refint/Application.dll
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/Application.pdb
+/home/semao0/Projects/PingTower/metrics-writer/src/Application/obj/Debug/net10.0/ref/Application.dll
