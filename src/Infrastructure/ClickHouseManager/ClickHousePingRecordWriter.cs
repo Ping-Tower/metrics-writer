@@ -2,6 +2,7 @@ using ClickHouse.Client.ADO;
 using Dapper;
 using Domain;
 using Microsoft.Extensions.Options;
+using System.Text;
 
 namespace Infrastructure.ClickHouseManager;
 
@@ -9,9 +10,12 @@ public class ClickHousePingRecordWriter(IOptions<ClickHouseSettings> options) : 
 {
     private readonly ClickHouseSettings _settings = options.Value;
 
-    public async Task WriteAsync(PingRecord record, CancellationToken cancellationToken)
+    public async Task BulkInsertAsync(IReadOnlyCollection<PingRecord> records, CancellationToken cancellationToken)
     {
-        const string sql = """
+        if (records.Count == 0)
+            return;
+
+        const string sqlPrefix = """
             INSERT INTO server_pings
             (
                 id,
@@ -33,50 +37,46 @@ public class ClickHousePingRecordWriter(IOptions<ClickHouseSettings> options) : 
                 ttl
             )
             VALUES
-            (
-                @Id,
-                @ServerId,
-                @Protocol,
-                @Timestamp,
-                @IsSuccess,
-                @LatencyMs,
-                @ErrorMessage,
-                @StatusCode,
-                @CertExpiresAt,
-                @TlsVersion,
-                @DnsLookupMs,
-                @SentBytes,
-                @ReceivedBytes,
-                @PacketLossPercent,
-                @RttMinMs,
-                @RttMaxMs,
-                @Ttl
-            )
             """;
+
+        var sql = new StringBuilder(sqlPrefix);
+        var parameters = new DynamicParameters();
+        var index = 0;
+
+        foreach (var record in records)
+        {
+            if (index > 0)
+                sql.Append(',');
+
+            sql.AppendLine();
+            sql.Append(
+                $"(@Id{index}, @ServerId{index}, @Protocol{index}, @Timestamp{index}, @IsSuccess{index}, @LatencyMs{index}, @ErrorMessage{index}, @StatusCode{index}, @CertExpiresAt{index}, @TlsVersion{index}, @DnsLookupMs{index}, @SentBytes{index}, @ReceivedBytes{index}, @PacketLossPercent{index}, @RttMinMs{index}, @RttMaxMs{index}, @Ttl{index})");
+
+            parameters.Add($"Id{index}", record.Id);
+            parameters.Add($"ServerId{index}", record.ServerId);
+            parameters.Add($"Protocol{index}", record.Protocol);
+            parameters.Add($"Timestamp{index}", record.Timestamp.ToUniversalTime());
+            parameters.Add($"IsSuccess{index}", record.IsSuccess);
+            parameters.Add($"LatencyMs{index}", record.LatencyMs);
+            parameters.Add($"ErrorMessage{index}", record.ErrorMessage);
+            parameters.Add($"StatusCode{index}", record.StatusCode);
+            parameters.Add($"CertExpiresAt{index}", record.CertExpiresAt?.ToUniversalTime());
+            parameters.Add($"TlsVersion{index}", record.TlsVersion);
+            parameters.Add($"DnsLookupMs{index}", record.DnsLookupMs);
+            parameters.Add($"SentBytes{index}", record.SentBytes);
+            parameters.Add($"ReceivedBytes{index}", record.ReceivedBytes);
+            parameters.Add($"PacketLossPercent{index}", record.PacketLossPercent);
+            parameters.Add($"RttMinMs{index}", record.RttMinMs);
+            parameters.Add($"RttMaxMs{index}", record.RttMaxMs);
+            parameters.Add($"Ttl{index}", record.Ttl);
+
+            index++;
+        }
 
         await using var connection = new ClickHouseConnection(_settings.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var command = new CommandDefinition(sql, new
-        {
-            record.Id,
-            record.ServerId,
-            record.Protocol,
-            Timestamp = record.Timestamp.ToUniversalTime(),
-            record.IsSuccess,
-            record.LatencyMs,
-            record.ErrorMessage,
-            record.StatusCode,
-            CertExpiresAt = record.CertExpiresAt?.ToUniversalTime(),
-            record.TlsVersion,
-            record.DnsLookupMs,
-            record.SentBytes,
-            record.ReceivedBytes,
-            record.PacketLossPercent,
-            record.RttMinMs,
-            record.RttMaxMs,
-            record.Ttl
-        }, cancellationToken: cancellationToken);
+        var command = new CommandDefinition(sql.ToString(), parameters, cancellationToken: cancellationToken);
 
         await connection.ExecuteAsync(command);
     }

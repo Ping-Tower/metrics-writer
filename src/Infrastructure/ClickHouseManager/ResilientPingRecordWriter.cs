@@ -54,11 +54,11 @@ public class ResilientPingRecordWriter : IPingRecordWriter
                 });
     }
 
-    public async Task WriteAsync(PingRecord record, CancellationToken cancellationToken)
+    public async Task BulkInsertAsync(IReadOnlyCollection<PingRecord> records, CancellationToken cancellationToken)
     {
         var combinedPolicy = Policy.WrapAsync(_asyncRetryPolicy, _timeoutPolicy, _circuitBreakerPolicy);
         await combinedPolicy.ExecuteAsync(
-            async ct => await _innerWriter.WriteAsync(record, ct),
+            async ct => await _innerWriter.BulkInsertAsync(records, ct),
             cancellationToken);
     }
 }

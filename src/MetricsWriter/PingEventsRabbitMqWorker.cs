@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Application.DTOs;
 using Domain;
 using Microsoft.Extensions.Options;
@@ -19,8 +20,11 @@ public class PingEventsRabbitMqWorker : BackgroundService
     private readonly ILogger<PingEventsRabbitMqWorker> _logger;
     private readonly IPingRecordWriter _pingRecordWriter;
     private readonly RabbitMqSettings _rabbitMqSettings;
+    private readonly SemaphoreSlim _channelOperationLock = new(1, 1);
     private IConnection? _connection;
     private IChannel? _channel;
+    private Channel<PingRecordEnvelope>? _pendingWrites;
+    private Task? _flushLoopTask;
 
     public PingEventsRabbitMqWorker(
         ILogger<PingEventsRabbitMqWorker> logger,
@@ -48,6 +52,11 @@ public class PingEventsRabbitMqWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
+        var batchSize = NormalizeBatchSize(_rabbitMqSettings.BatchSize);
+        var flushInterval = NormalizeFlushInterval(_rabbitMqSettings.FlushIntervalMs);
+        var prefetchCount = NormalizePrefetchCount(_rabbitMqSettings.PrefetchCount, batchSize);
+        var channelCapacity = NormalizeChannelCapacity(_rabbitMqSettings.ChannelCapacity, batchSize, prefetchCount);
+
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -55,58 +64,27 @@ public class PingEventsRabbitMqWorker : BackgroundService
                 if (_channel is null || _channel.IsClosed)
                 {
                     await ConnectToRabbitMq(cancellationToken);
+                    await ConfigureQosAsync(prefetchCount, cancellationToken);
                 }
 
+                StartBatchingSession(batchSize, flushInterval, channelCapacity);
+
                 var consumer = new AsyncEventingBasicConsumer(_channel!);
-                consumer.ReceivedAsync += async (_, ea) =>
-                {
-                    try
-                    {
-                        var body = ea.Body.ToArray();
-                        var message = Encoding.UTF8.GetString(body);
-                        var pingMessage = JsonSerializer.Deserialize<PingRecordedMessageDto>(message, JsonSerializerOptions);
+                consumer.ReceivedAsync += async (_, ea) => await BufferMessageAsync(ea, cancellationToken);
 
-                        if (pingMessage is null || pingMessage.Id == Guid.Empty || string.IsNullOrWhiteSpace(pingMessage.ServerId) || string.IsNullOrWhiteSpace(pingMessage.Protocol))
-                        {
-                            _logger.LogWarning("Invalid ping metrics message: {Message}", message);
-                            await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-                            return;
-                        }
-
-                        var pingRecord = MapToPingRecord(pingMessage);
-                        await _pingRecordWriter.WriteAsync(pingRecord, cancellationToken);
-
-                        _logger.LogInformation(
-                            "Ping metrics written. Id: {Id}, ServerId: {ServerId}, Protocol: {Protocol}, Success: {IsSuccess}",
-                            pingMessage.Id,
-                            pingMessage.ServerId,
-                            pingMessage.Protocol,
-                            pingMessage.IsSuccess);
-
-                        await _channel!.BasicAckAsync(ea.DeliveryTag, multiple: false);
-                    }
-                    catch (JsonException jsonEx)
-                    {
-                        _logger.LogError(jsonEx, "Invalid JSON format. Sending message directly to DLQ.");
-                        await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error while writing ping metrics. Message will be requeued.");
-                        await _channel!.BasicNackAsync(ea.DeliveryTag, multiple: false, requeue: true);
-                    }
-                };
-
-                await _channel!.BasicConsumeAsync(
-                    queue: _rabbitMqSettings.MainQueue,
-                    autoAck: false,
-                    consumer: consumer,
-                    cancellationToken: cancellationToken);
+                await StartConsumerAsync(consumer, cancellationToken);
 
                 while (!_channel!.IsClosed && !cancellationToken.IsCancellationRequested)
                 {
+                    if (_flushLoopTask is { IsCompleted: true })
+                        await _flushLoopTask;
+
                     await Task.Delay(1000, cancellationToken);
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
             }
             catch (OperationInterruptedException ex) when (ex.ShutdownReason?.Initiator == ShutdownInitiator.Peer)
             {
@@ -120,38 +98,50 @@ public class PingEventsRabbitMqWorker : BackgroundService
             }
             finally
             {
-                if (_channel is not null && !_channel.IsClosed)
-                {
-                    await _channel.CloseAsync(cancellationToken);
-                    _channel.Dispose();
-                    _channel = null;
-                }
-
-                if (_connection is not null && _connection.IsOpen)
-                {
-                    await _connection.CloseAsync(cancellationToken);
-                    _connection.Dispose();
-                    _connection = null;
-                }
+                await StopBatchingSessionAsync(CancellationToken.None);
+                await CloseRabbitMqAsync(CancellationToken.None);
             }
         }
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_channel is not null)
-        {
-            await _channel.CloseAsync(cancellationToken);
-            _channel.Dispose();
-        }
-
-        if (_connection is not null)
-        {
-            await _connection.CloseAsync(cancellationToken);
-            _connection.Dispose();
-        }
-
+        await StopBatchingSessionAsync(CancellationToken.None);
+        await CloseRabbitMqAsync(cancellationToken);
         await base.StopAsync(cancellationToken);
+    }
+
+    private async Task ConfigureQosAsync(ushort prefetchCount, CancellationToken cancellationToken)
+    {
+        await WithChannelAsync(
+            async channel => await channel.BasicQosAsync(
+                prefetchSize: 0,
+                prefetchCount: prefetchCount,
+                global: false,
+                cancellationToken: cancellationToken),
+            cancellationToken);
+    }
+
+    private void StartBatchingSession(int batchSize, TimeSpan flushInterval, int channelCapacity)
+    {
+        _pendingWrites = Channel.CreateBounded<PingRecordEnvelope>(new BoundedChannelOptions(channelCapacity)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false
+        });
+        _flushLoopTask = RunFlushLoopAsync(_pendingWrites.Reader, batchSize, flushInterval);
+    }
+
+    private async Task StartConsumerAsync(AsyncEventingBasicConsumer consumer, CancellationToken cancellationToken)
+    {
+        await WithChannelAsync(
+            async channel => await channel.BasicConsumeAsync(
+                queue: _rabbitMqSettings.MainQueue,
+                autoAck: false,
+                consumer: consumer,
+                cancellationToken: cancellationToken),
+            cancellationToken);
     }
 
     private static PingRecord MapToPingRecord(PingRecordedMessageDto message)
@@ -176,5 +166,258 @@ public class PingEventsRabbitMqWorker : BackgroundService
             RttMaxMs = message.RttMaxMs,
             Ttl = message.Ttl
         };
+    }
+
+    private async Task BufferMessageAsync(BasicDeliverEventArgs delivery, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var body = delivery.Body.ToArray();
+            var message = Encoding.UTF8.GetString(body);
+            var pingMessage = JsonSerializer.Deserialize<PingRecordedMessageDto>(message, JsonSerializerOptions);
+
+            if (pingMessage is null || pingMessage.Id == Guid.Empty || string.IsNullOrWhiteSpace(pingMessage.ServerId) || string.IsNullOrWhiteSpace(pingMessage.Protocol))
+            {
+                _logger.LogWarning("Invalid ping metrics message: {Message}", message);
+                await NackAsync(delivery.DeliveryTag, requeue: false, cancellationToken);
+                return;
+            }
+
+            var pendingWrites = _pendingWrites ?? throw new InvalidOperationException("Pending write buffer is not initialized.");
+            await pendingWrites.Writer.WriteAsync(
+                new PingRecordEnvelope(MapToPingRecord(pingMessage), delivery.DeliveryTag),
+                cancellationToken);
+        }
+        catch (JsonException jsonEx)
+        {
+            _logger.LogError(jsonEx, "Invalid JSON format. Sending message directly to DLQ.");
+            await NackAsync(delivery.DeliveryTag, requeue: false, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (ChannelClosedException)
+        {
+            await NackAsync(delivery.DeliveryTag, requeue: true, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while buffering ping metrics. Message will be requeued.");
+            await NackAsync(delivery.DeliveryTag, requeue: true, cancellationToken);
+        }
+    }
+
+    private async Task RunFlushLoopAsync(ChannelReader<PingRecordEnvelope> reader, int batchSize, TimeSpan flushInterval)
+    {
+        while (await reader.WaitToReadAsync())
+        {
+            var batch = new List<PingRecordEnvelope>(batchSize);
+            while (batch.Count < batchSize && reader.TryRead(out var bufferedPing))
+            {
+                batch.Add(bufferedPing);
+            }
+
+            if (batch.Count == 0)
+                continue;
+
+            await FillBatchUntilDeadlineAsync(reader, batch, batchSize, flushInterval);
+            await FlushBatchAsync(batch);
+        }
+    }
+
+    private static async Task FillBatchUntilDeadlineAsync(
+        ChannelReader<PingRecordEnvelope> reader,
+        List<PingRecordEnvelope> batch,
+        int batchSize,
+        TimeSpan flushInterval)
+    {
+        var deadline = DateTime.UtcNow + flushInterval;
+
+        while (batch.Count < batchSize)
+        {
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                return;
+
+            using var timeoutCts = new CancellationTokenSource(remaining);
+            try
+            {
+                batch.Add(await reader.ReadAsync(timeoutCts.Token));
+
+                while (batch.Count < batchSize && reader.TryRead(out var bufferedPing))
+                {
+                    batch.Add(bufferedPing);
+                }
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (ChannelClosedException)
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task FlushBatchAsync(IReadOnlyList<PingRecordEnvelope> batch)
+    {
+        try
+        {
+            await _pingRecordWriter.BulkInsertAsync(batch.Select(x => x.Record).ToArray(), CancellationToken.None);
+            await AckBatchAsync(batch, CancellationToken.None);
+
+            _logger.LogInformation("Flushed ping metrics batch. Size: {BatchSize}", batch.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to insert batch into ClickHouse. Nacking {Count} messages.", batch.Count);
+            await NackBatchAsync(batch, CancellationToken.None);
+            throw;
+        }
+    }
+
+    private async Task StopBatchingSessionAsync(CancellationToken cancellationToken)
+    {
+        _pendingWrites?.Writer.TryComplete();
+
+        if (_flushLoopTask is not null)
+        {
+            try
+            {
+                await _flushLoopTask.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Metrics flush loop stopped with an error.");
+            }
+        }
+
+        _flushLoopTask = null;
+        _pendingWrites = null;
+    }
+
+    private async Task AckAsync(ulong deliveryTag, CancellationToken cancellationToken)
+    {
+        await WithChannelAsync(
+            async channel => await channel.BasicAckAsync(deliveryTag, multiple: false, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task AckBatchAsync(IReadOnlyList<PingRecordEnvelope> batch, CancellationToken cancellationToken)
+    {
+        await _channelOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_channel is null || _channel.IsClosed)
+                return;
+
+            foreach (var bufferedPing in batch)
+            {
+                await _channel.BasicAckAsync(bufferedPing.DeliveryTag, multiple: false, cancellationToken);
+            }
+        }
+        finally
+        {
+            _channelOperationLock.Release();
+        }
+    }
+
+    private async Task NackAsync(ulong deliveryTag, bool requeue, CancellationToken cancellationToken)
+    {
+        await WithChannelAsync(
+            async channel => await channel.BasicNackAsync(deliveryTag, multiple: false, requeue: requeue, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task NackBatchAsync(IReadOnlyList<PingRecordEnvelope> batch, CancellationToken cancellationToken)
+    {
+        await _channelOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_channel is null || _channel.IsClosed)
+                return;
+
+            foreach (var bufferedPing in batch)
+            {
+                await _channel.BasicNackAsync(bufferedPing.DeliveryTag, multiple: false, requeue: true, cancellationToken);
+            }
+        }
+        finally
+        {
+            _channelOperationLock.Release();
+        }
+    }
+
+    private async Task WithChannelAsync(Func<IChannel, Task> action, CancellationToken cancellationToken)
+    {
+        await _channelOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_channel is null || _channel.IsClosed)
+                throw new InvalidOperationException("RabbitMQ channel is not available.");
+
+            await action(_channel);
+        }
+        finally
+        {
+            _channelOperationLock.Release();
+        }
+    }
+
+    private async Task CloseRabbitMqAsync(CancellationToken cancellationToken)
+    {
+        await _channelOperationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_channel is not null)
+            {
+                if (!_channel.IsClosed)
+                    await _channel.CloseAsync(cancellationToken);
+
+                _channel.Dispose();
+                _channel = null;
+            }
+
+            if (_connection is not null)
+            {
+                if (_connection.IsOpen)
+                    await _connection.CloseAsync(cancellationToken);
+
+                _connection.Dispose();
+                _connection = null;
+            }
+        }
+        finally
+        {
+            _channelOperationLock.Release();
+        }
+    }
+
+    private static int NormalizeBatchSize(int batchSize) => batchSize > 0 ? batchSize : 500;
+
+    private static TimeSpan NormalizeFlushInterval(int flushIntervalMs) => TimeSpan.FromMilliseconds(flushIntervalMs > 0 ? flushIntervalMs : 1000);
+
+    private static ushort NormalizePrefetchCount(ushort prefetchCount, int batchSize)
+    {
+        if (prefetchCount <= batchSize)
+            throw new InvalidOperationException("RabbitMqSettings.PrefetchCount must be greater than BatchSize.");
+
+        return prefetchCount;
+    }
+
+    private static int NormalizeChannelCapacity(int channelCapacity, int batchSize, ushort prefetchCount)
+    {
+        if (channelCapacity <= 0)
+            throw new InvalidOperationException("RabbitMqSettings.ChannelCapacity must be greater than zero.");
+        if (channelCapacity < batchSize)
+            throw new InvalidOperationException("RabbitMqSettings.ChannelCapacity must be greater than or equal to BatchSize.");
+        if (channelCapacity < prefetchCount)
+            throw new InvalidOperationException("RabbitMqSettings.ChannelCapacity must be greater than or equal to PrefetchCount.");
+
+        return channelCapacity;
     }
 }
