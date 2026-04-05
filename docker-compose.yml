@@ -1,0 +1,27 @@
+services:
+  metrics-writer:
+    container_name: metrics-writer
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pingtower/metrics-writer:local
+    restart: unless-stopped
+    environment:
+      DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}
+      RabbitMqSettings__HostName: ${RABBITMQ_HOST}
+      RabbitMqSettings__Port: ${RABBITMQ_PORT}
+      RabbitMqSettings__UserName: ${RABBITMQ_USER}
+      RabbitMqSettings__Password: ${RABBITMQ_PASSWORD}
+      RabbitMqSettings__MainQueue: ${RABBITMQ_MAIN_QUEUE}
+      RabbitMqSettings__BatchSize: ${RABBITMQ_BATCH_SIZE}
+      RabbitMqSettings__FlushIntervalMs: ${RABBITMQ_FLUSH_INTERVAL_MS}
+      RabbitMqSettings__PrefetchCount: ${RABBITMQ_PREFETCH_COUNT}
+      RabbitMqSettings__ChannelCapacity: ${RABBITMQ_CHANNEL_CAPACITY}
+      ClickHouseSettings__ConnectionString: ${CLICKHOUSE_CONNECTION_STRING}
+    networks:
+      - pingtower_network
+
+networks:
+  pingtower_network:
+    name: pingtower_network
+    external: true

@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+**/bin/
+**/obj/
+src/Tests/
+README.md

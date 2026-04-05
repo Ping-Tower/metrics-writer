@@ -12,6 +12,7 @@ public static class DI
         DefaultTypeMap.MatchNamesWithUnderscores = true;
 
         services.Configure<ClickHouseSettings>(configuration.GetSection("ClickHouseSettings"));
+        services.AddTransient<IClickHouseConnectionFactory, ClickHouseConnectionFactory>();
         services.AddTransient<IPingRecordWriter, ClickHousePingRecordWriter>();
         services.Decorate<IPingRecordWriter, ResilientPingRecordWriter>();
 

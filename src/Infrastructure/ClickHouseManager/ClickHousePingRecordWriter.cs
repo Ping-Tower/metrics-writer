@@ -1,15 +1,13 @@
 using ClickHouse.Client.ADO;
 using Dapper;
 using Domain;
-using Microsoft.Extensions.Options;
+using System.Data.Common;
 using System.Text;
 
 namespace Infrastructure.ClickHouseManager;
 
-public class ClickHousePingRecordWriter(IOptions<ClickHouseSettings> options) : IPingRecordWriter
+public class ClickHousePingRecordWriter(IClickHouseConnectionFactory connectionFactory) : IPingRecordWriter
 {
-    private readonly ClickHouseSettings _settings = options.Value;
-
     public async Task BulkInsertAsync(IReadOnlyCollection<PingRecord> records, CancellationToken cancellationToken)
     {
         if (records.Count == 0)
@@ -73,8 +71,7 @@ public class ClickHousePingRecordWriter(IOptions<ClickHouseSettings> options) : 
             index++;
         }
 
-        await using var connection = new ClickHouseConnection(_settings.ConnectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using DbConnection connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
 
         var command = new CommandDefinition(sql.ToString(), parameters, cancellationToken: cancellationToken);
 
