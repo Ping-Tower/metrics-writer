@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pingtower/metrics-writer:local
+    image: ${METRICS_WRITER_IMAGE_NAME}
     restart: unless-stopped
     environment:
       DOTNET_ENVIRONMENT: ${DOTNET_ENVIRONMENT}

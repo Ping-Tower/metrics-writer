@@ -38,7 +38,7 @@ public class ClickHousePingRecordWriter(IClickHouseConnectionFactory connectionF
             """;
 
         var sql = new StringBuilder(sqlPrefix);
-        var parameters = new DynamicParameters();
+        var parameters = new ClickHouseTypedParameters();
         var index = 0;
 
         foreach (var record in records)
@@ -48,25 +48,28 @@ public class ClickHousePingRecordWriter(IClickHouseConnectionFactory connectionF
 
             sql.AppendLine();
             sql.Append(
-                $"(@Id{index}, @ServerId{index}, @Protocol{index}, @Timestamp{index}, @IsSuccess{index}, @LatencyMs{index}, @ErrorMessage{index}, @StatusCode{index}, @CertExpiresAt{index}, @TlsVersion{index}, @DnsLookupMs{index}, @SentBytes{index}, @ReceivedBytes{index}, @PacketLossPercent{index}, @RttMinMs{index}, @RttMaxMs{index}, @Ttl{index})");
+                $"(@Id{index}, @ServerId{index}, @Protocol{index}, @Timestamp{index}, @IsSuccess{index}, " +
+                $"@LatencyMs{index}, @ErrorMessage{index}, @StatusCode{index}, @CertExpiresAt{index}, " +
+                $"@TlsVersion{index}, @DnsLookupMs{index}, @SentBytes{index}, @ReceivedBytes{index}, " +
+                $"@PacketLossPercent{index}, @RttMinMs{index}, @RttMaxMs{index}, @Ttl{index})");
 
-            parameters.Add($"Id{index}", record.Id);
-            parameters.Add($"ServerId{index}", record.ServerId);
-            parameters.Add($"Protocol{index}", record.Protocol);
-            parameters.Add($"Timestamp{index}", record.Timestamp.ToUniversalTime());
-            parameters.Add($"IsSuccess{index}", record.IsSuccess);
-            parameters.Add($"LatencyMs{index}", record.LatencyMs);
-            parameters.Add($"ErrorMessage{index}", record.ErrorMessage);
-            parameters.Add($"StatusCode{index}", record.StatusCode);
-            parameters.Add($"CertExpiresAt{index}", record.CertExpiresAt?.ToUniversalTime());
-            parameters.Add($"TlsVersion{index}", record.TlsVersion);
-            parameters.Add($"DnsLookupMs{index}", record.DnsLookupMs);
-            parameters.Add($"SentBytes{index}", record.SentBytes);
-            parameters.Add($"ReceivedBytes{index}", record.ReceivedBytes);
-            parameters.Add($"PacketLossPercent{index}", record.PacketLossPercent);
-            parameters.Add($"RttMinMs{index}", record.RttMinMs);
-            parameters.Add($"RttMaxMs{index}", record.RttMaxMs);
-            parameters.Add($"Ttl{index}", record.Ttl);
+            parameters.Add($"Id{index}",              record.Id,                                         "UUID");
+            parameters.Add($"ServerId{index}",        record.ServerId,                                   "String");
+            parameters.Add($"Protocol{index}",        record.Protocol,                                   "String");
+            parameters.Add($"Timestamp{index}",       record.Timestamp.ToUniversalTime(),                "DateTime64(3)");
+            parameters.Add($"IsSuccess{index}",       record.IsSuccess,                                  "Bool");
+            parameters.Add($"LatencyMs{index}",       record.LatencyMs,                                  "Nullable(Float64)");
+            parameters.Add($"ErrorMessage{index}",    record.ErrorMessage,                               "Nullable(String)");
+            parameters.Add($"StatusCode{index}",      record.StatusCode,                                 "Nullable(Int32)");
+            parameters.Add($"CertExpiresAt{index}",   record.CertExpiresAt?.ToUniversalTime(),           "Nullable(DateTime64(3))");
+            parameters.Add($"TlsVersion{index}",      record.TlsVersion,                                 "Nullable(String)");
+            parameters.Add($"DnsLookupMs{index}",     record.DnsLookupMs,                                "Nullable(Float64)");
+            parameters.Add($"SentBytes{index}",       record.SentBytes,                                  "Nullable(Int64)");
+            parameters.Add($"ReceivedBytes{index}",   record.ReceivedBytes,                              "Nullable(Int64)");
+            parameters.Add($"PacketLossPercent{index}", record.PacketLossPercent,                        "Nullable(Float64)");
+            parameters.Add($"RttMinMs{index}",        record.RttMinMs,                                   "Nullable(Float64)");
+            parameters.Add($"RttMaxMs{index}",        record.RttMaxMs,                                   "Nullable(Float64)");
+            parameters.Add($"Ttl{index}",             record.Ttl,                                        "Nullable(Int32)");
 
             index++;
         }
@@ -74,7 +77,6 @@ public class ClickHousePingRecordWriter(IClickHouseConnectionFactory connectionF
         await using DbConnection connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
 
         var command = new CommandDefinition(sql.ToString(), parameters, cancellationToken: cancellationToken);
-
         await connection.ExecuteAsync(command);
     }
 }
