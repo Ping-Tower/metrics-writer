@@ -1,28 +1,14 @@
-<div align="center">
+# PingTower Metrics Writer
 
-<a href="https://gitlab.com/pingtower"><img src="https://gitlab.com/uploads/-/system/group/avatar/121984904/logo-mark-avatar.png" width="72" alt="PingTower"></a>
+Batches ping history into ClickHouse — up to 500 rows or once a second, whichever comes first.
 
-# 💾 metrics-writer
-
-### Batches ping history into ClickHouse — up to 500 rows or once a second, whichever comes first
-
-[![pipeline](https://gitlab.com/pingtower/metrics-writer/badges/main/pipeline.svg)](https://gitlab.com/pingtower/metrics-writer/-/pipelines)
-![C#](https://img.shields.io/badge/C%23_·_.NET_10-512BD4?logo=dotnet&logoColor=white)
-![ClickHouse](https://img.shields.io/badge/ClickHouse-FFCC01?logo=clickhouse&logoColor=black)
-![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?logo=rabbitmq&logoColor=white)
-![Polly](https://img.shields.io/badge/Polly-resilience-6366f1)
-
-<sub>Part of <a href="https://gitlab.com/pingtower"><b>PingTower</b></a> — real-time server availability monitoring</sub>
-
-</div>
-
----
+Stack: C#, .NET 10, ClickHouse, RabbitMQ, Polly.
 
 ## Role in the system
 
-Every probe made by [ping-service](https://gitlab.com/pingtower/ping-service) ends up here. metrics-writer
+Every probe made by `ping-service` ends up here. metrics-writer
 turns the high-frequency event stream into efficient bulk inserts, so ClickHouse gets a few large writes
-instead of thousands of tiny ones. The [api](https://gitlab.com/pingtower/api) then reads this table for
+instead of thousands of tiny ones. The `api` then reads this table for
 latency charts, uptime and ping history.
 
 ```mermaid
@@ -44,14 +30,14 @@ flowchart LR
 
 | Direction | Channel | Name | Payload |
 | --- | --- | --- | --- |
-| ⬅️ In | queue ← `pingEventsExchange` | `q.metrics-writer.ping-events` (`server.ping.recorded`) | ping result |
-| 💾 Storage | ClickHouse | `pingtower_analytics.server_pings` | one row per ping; `MergeTree`, partitioned by day, `TTL 30 days` |
+| In | queue ← `pingEventsExchange` | `q.metrics-writer.ping-events` (`server.ping.recorded`) | ping result |
+| Storage | ClickHouse | `pingtower_analytics.server_pings` | one row per ping; `MergeTree`, partitioned by day, `TTL 30 days` |
 
-The table is created by [`infra/clickhouse/clickhouse-init/init.sql`](https://gitlab.com/pingtower/infra/-/blob/main/clickhouse/clickhouse-init/init.sql).
+The table is created by `infra/clickhouse/clickhouse-init/init.sql`.
 
 ## Quick start
 
-**Whole stack** — via [infra](https://gitlab.com/pingtower/infra) (all repos cloned side by side):
+**Whole stack** — via `infra` (all repos cloned side by side):
 
 ```bash
 make -C infra up
