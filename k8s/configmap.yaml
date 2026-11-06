@@ -1,0 +1,12 @@
+# Пакетная запись пинга в ClickHouse: настройки батча из appsettings.example.json.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-writer
+  namespace: pingtower
+data:
+  DOTNET_ENVIRONMENT: Production
+  RabbitMqSettings__BatchSize: "500"
+  RabbitMqSettings__FlushIntervalMs: "1000"
+  RabbitMqSettings__PrefetchCount: "1000"
+  RabbitMqSettings__ChannelCapacity: "2000"

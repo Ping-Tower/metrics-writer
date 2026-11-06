@@ -1,0 +1,100 @@
+# Воркер метрик: потребляет q.metrics-writer.ping-events, батчем пишет в ClickHouse.
+# HTTP-сервера нет — Service не нужен, проб нет (in-process health — будущий коммит).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-writer
+  namespace: pingtower
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: metrics-writer
+  template:
+    metadata:
+      labels:
+        app: metrics-writer
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: gitlab-registry
+      containers:
+        - name: metrics-writer
+          image: registry.gitlab.com/pingtower/metrics-writer:REPLACE_WITH_COMMIT_SHA
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          envFrom:
+            - configMapRef:
+                name: metrics-writer
+          env:
+            - name: RabbitMqSettings__HostName
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: RABBITMQ_HOST
+            - name: RabbitMqSettings__Port
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: RABBITMQ_PORT
+            - name: RabbitMqSettings__UserName
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: RABBITMQ_USER
+            - name: RabbitMqSettings__Password
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq
+                  key: password
+            - name: RabbitMqSettings__MainQueue
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: METRICS_WRITER_RABBITMQ_MAIN_QUEUE
+            - name: CLICKHOUSE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: CLICKHOUSE_HOST
+            - name: CLICKHOUSE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: CLICKHOUSE_PORT
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: CLICKHOUSE_USER
+            - name: CLICKHOUSE_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: pingtower-infra
+                  key: CLICKHOUSE_DB
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse
+                  key: password
+            - name: ClickHouseSettings__ConnectionString
+              value: "Host=$(CLICKHOUSE_HOST);Protocol=http;Port=$(CLICKHOUSE_PORT);Username=$(CLICKHOUSE_USER);Password=$(CLICKHOUSE_PASSWORD);Database=$(CLICKHOUSE_DB)"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
