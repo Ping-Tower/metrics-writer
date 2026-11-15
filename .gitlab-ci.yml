@@ -1,13 +1,14 @@
 stages:
   - test
   - build
+  - container_scan
   - deploy
-
 workflow:
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - if: $CI_COMMIT_BRANCH
 variables:
   DOCKER_IMAGE_NAME: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
   DOTNET_NOLOGO: "true"
@@ -18,9 +19,8 @@ unit_tests:
   stage: test
   image: mcr.microsoft.com/dotnet/sdk:10.0
   script:
-    - dotnet test tests/MetricsWriter.UnitTests/MetricsWriter.UnitTests.csproj
-        -c Release
-        --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml"
+    - dotnet test tests/MetricsWriter.UnitTests/MetricsWriter.UnitTests.csproj -c Release --logger
+      "junit;LogFilePath=$CI_PROJECT_DIR/test-results/unit.xml"
   artifacts:
     when: always
     reports:
@@ -30,9 +30,8 @@ integration_tests:
   stage: test
   image: mcr.microsoft.com/dotnet/sdk:10.0
   script:
-    - dotnet test tests/MetricsWriter.IntegrationTests/MetricsWriter.IntegrationTests.csproj
-        -c Release
-        --logger "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
+    - dotnet test tests/MetricsWriter.IntegrationTests/MetricsWriter.IntegrationTests.csproj -c Release --logger
+      "junit;LogFilePath=$CI_PROJECT_DIR/test-results/integration.xml"
   artifacts:
     when: always
     reports:
@@ -46,21 +45,24 @@ build_image:
   variables:
     GIT_SUBMODULE_STRATEGY: recursive
     GIT_SUBMODULE_DEPTH: 1
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ''
   before_script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - printf '%s' "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
   script:
     - docker buildx create --use --driver docker-container --driver-opt network=host
-    - docker buildx build --pull --provenance=false --sbom=false
-        --cache-from type=registry,ref=$CI_REGISTRY_IMAGE:buildcache
-        --cache-to type=registry,ref=$CI_REGISTRY_IMAGE:buildcache,mode=max
-        -t $DOCKER_IMAGE_NAME --push .
+    - docker buildx build --pull --provenance=false --sbom=false --cache-from
+      type=registry,ref=$CI_REGISTRY_IMAGE:buildcache --cache-to
+      type=registry,ref=$CI_REGISTRY_IMAGE:buildcache,mode=max -t $DOCKER_IMAGE_NAME --push .
 
 # K8s-deploy: манифесты в k8s/, деплой через GitLab Agent.
 deploy:
   stage: deploy
-  needs: [build_image]
+  needs:
+    - build_image
+    - trivy-image
   image:
     name: alpine/kubectl:1.37.1
     entrypoint: [""]
@@ -79,9 +81,13 @@ deploy:
     - sed -i "s/REPLACE_WITH_COMMIT_SHA/$CI_COMMIT_SHA/g" k8s/kustomization.yaml
     - kubectl apply --dry-run=server -k k8s/
     # Собственный Store у воркера нет; нужные секреты выдаёт pingtower-infra.
-    - kubectl -n pingtower wait --for=condition=Ready
-        externalsecret/rabbitmq externalsecret/clickhouse
-        externalsecret/gitlab-registry --timeout=120s
+    - kubectl -n pingtower wait --for=condition=Ready externalsecret/rabbitmq externalsecret/clickhouse
+      externalsecret/gitlab-registry --timeout=120s
     - kubectl -n pingtower get secret rabbitmq clickhouse gitlab-registry -o name
     - kubectl apply -k k8s/
     - kubectl -n pingtower rollout status deployment/metrics-writer --timeout=600s
+default:
+  tags:
+    - saas-linux-small-amd64
+include:
+  - local: .gitlab/ci/security.yml
